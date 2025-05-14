@@ -1,0 +1,214 @@
+# Must run as administrator
+#Requires -RunAsAdministrator
+
+# Create directory for icons if it doesn't exist
+$iconDir = "$env:ProgramData\CustomFolderTypes"
+if(!(Test-Path $iconDir)) {
+    New-Item -Path $iconDir -ItemType Directory -Force | Out-Null
+    Write-Host "Created directory: $iconDir"
+}
+
+# Function to create a default icon if download fails
+function New-DefaultIcon {
+    param (
+        [string]$iconPath,
+        [string]$iconType
+    )
+    
+    Write-Host "Creating a default $iconType icon at $iconPath"
+    
+    # Create a simple colored icon using .NET
+    Add-Type -AssemblyName System.Drawing
+    
+    # Pick color based on icon type
+    $color = switch ($iconType) {
+        "file_storer" { [System.Drawing.Color]::FromArgb(255, 100, 149, 237) } # Cornflower Blue
+        "sandbox_separator" { [System.Drawing.Color]::FromArgb(255, 255, 165, 0) } # Orange
+        "assets_storer" { [System.Drawing.Color]::FromArgb(255, 60, 179, 113) } # Medium Sea Green
+        default { [System.Drawing.Color]::FromArgb(255, 169, 169, 169) } # Dark Gray
+    }
+    
+    # Create a bitmap and draw a folder-like shape
+    $bitmap = New-Object System.Drawing.Bitmap(64, 64)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.Clear([System.Drawing.Color]::Transparent)
+    
+    # Draw folder-like shape
+    $brush = New-Object System.Drawing.SolidBrush($color)
+    $folderPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+    
+    # Tab part of folder
+    $folderPath.AddRectangle(New-Object System.Drawing.Rectangle(15, 8, 20, 6))
+    
+    # Main folder body
+    $folderPath.AddRectangle(New-Object System.Drawing.Rectangle(10, 14, 44, 34))
+    
+    $graphics.FillPath($brush, $folderPath)
+    
+    # Save as icon
+    $icon = [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
+    $fileStream = New-Object System.IO.FileStream($iconPath, [System.IO.FileMode]::Create)
+    $icon.Save($fileStream)
+    
+    # Clean up resources
+    $fileStream.Close()
+    $graphics.Dispose()
+    $bitmap.Dispose()
+    $icon.Dispose()
+    
+    return $true
+}
+
+# Function to download or create an icon
+function Get-IconFile {
+    param (
+        [string]$iconName
+    )
+    
+    $iconPath = "$iconDir\$iconName.ico"
+    
+    if(!(Test-Path $iconPath)) {
+        Write-Host "Icon $iconName.ico not found. Creating default icon."
+        New-DefaultIcon -iconPath $iconPath -iconType $iconName
+    }
+    
+    return $true
+}
+
+# Download or use existing icons
+$fileStorerIcon = Get-IconFile -iconName "file_storer"
+$sandboxIcon = Get-IconFile -iconName "sandbox_separator"
+$assetsIcon = Get-IconFile -iconName "assets_storer"
+
+# Function to create and register a folder type
+function Register-FolderType {
+    param (
+        [string]$name,
+        [string]$displayName,
+        [string]$iconName,
+        [string]$description
+    )
+    
+    $iconPath = "$iconDir\$iconName.ico"
+    
+    # Create desktop.ini template
+    $desktopIni = @"
+[.ShellClassInfo]
+IconResource=$iconPath,0
+InfoTip=$description
+"@
+    
+    $iniPath = "$iconDir\$name.ini"
+    $desktopIni | Out-File -FilePath $iniPath -Encoding ascii
+    
+    # Create registry key for the context menu entry in the "New" menu
+    $newMenuKeyPath = "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder\shell\$name"
+    
+    # Create parent key if it doesn't exist
+    if(!(Test-Path "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder")) {
+        New-Item -Path "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder" -Force | Out-Null
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder" -Name "MUIVerb" -Value "New Custom Folder" -PropertyType String | Out-Null
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder" -Name "SubCommands" -Value "" -PropertyType String | Out-Null
+    }
+    
+    # Create the command entry
+    if(!(Test-Path $newMenuKeyPath)) {
+        New-Item -Path $newMenuKeyPath -Force | Out-Null
+        New-ItemProperty -Path $newMenuKeyPath -Name "(Default)" -Value $displayName -PropertyType String | Out-Null
+        New-ItemProperty -Path $newMenuKeyPath -Name "Description" -Value $description -PropertyType String | Out-Null
+        
+        $cmdPath = "$newMenuKeyPath\command"
+        New-Item -Path $cmdPath -Force | Out-Null
+        
+        # Create a simpler, more reliable command with fewer nested quotes
+        $scriptBlock = @"
+mkdir "%V%\$displayName"
+attrib +s "%V%\$displayName"
+echo [.ShellClassInfo] > "%V%\$displayName\desktop.ini"
+echo IconResource=$iconPath,0 >> "%V%\$displayName\desktop.ini"
+echo InfoTip=$description >> "%V%\$displayName\desktop.ini"
+attrib +h +s "%V%\$displayName\desktop.ini"
+attrib +r "%V%\$displayName"
+"@
+        
+        $tempScriptPath = "$iconDir\create_$name.cmd"
+        $scriptBlock | Out-File -FilePath $tempScriptPath -Encoding ascii
+        
+        $command = "cmd.exe /c `"$tempScriptPath`""
+        New-ItemProperty -Path $cmdPath -Name "(Default)" -Value $command -PropertyType String | Out-Null
+    }
+}
+
+# Alternative method: Register directly in the "New" context menu
+function Register-InNewMenu {
+    param (
+        [string]$name,
+        [string]$displayName,
+        [string]$iconName,
+        [string]$description
+    )
+    
+    $iconPath = "$iconDir\$iconName.ico"
+    
+    # Create registry key for the context menu entry in the "New" menu
+    $newMenuKeyPath = "HKLM:\SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers\NewCustom$name"
+    
+    if(!(Test-Path $newMenuKeyPath)) {
+        New-Item -Path $newMenuKeyPath -Force | Out-Null
+        
+        # Create GUID for the handler
+        $guid = [System.Guid]::NewGuid().ToString("B")
+        New-ItemProperty -Path $newMenuKeyPath -Name "(Default)" -Value $guid -PropertyType String | Out-Null
+        
+        # Register the handler in CLSID
+        $clsidPath = "HKLM:\SOFTWARE\Classes\CLSID\$guid"
+        New-Item -Path $clsidPath -Force | Out-Null
+        New-ItemProperty -Path $clsidPath -Name "(Default)" -Value "Custom Folder: $displayName" -PropertyType String | Out-Null
+        
+        # Define InProcServer32
+        $serverPath = "$clsidPath\InProcServer32"
+        New-Item -Path $serverPath -Force | Out-Null
+        
+        # Create batch script for the handler
+        $scriptPath = "$iconDir\$name.cmd"
+        
+        @"
+@echo off
+mkdir "%1\$displayName"
+attrib +s "%1\$displayName"
+echo [.ShellClassInfo] > "%1\$displayName\desktop.ini"
+echo IconResource=$iconPath,0 >> "%1\$displayName\desktop.ini"
+echo InfoTip=$description >> "%1\$displayName\desktop.ini"
+attrib +h +s "%1\$displayName\desktop.ini"
+attrib +r "%1\$displayName"
+"@ | Out-File -FilePath $scriptPath -Encoding ascii
+        
+        # Register the script path
+        New-ItemProperty -Path $serverPath -Name "(Default)" -Value $scriptPath -PropertyType String | Out-Null
+        New-ItemProperty -Path $serverPath -Name "ThreadingModel" -Value "Apartment" -PropertyType String | Out-Null
+    }
+}
+
+# Try both approaches for better compatibility
+# First approach: Custom submenu
+Write-Host "Registering folder types with custom submenu approach..."
+Register-FolderType -name "FileStorer" -displayName "File Storer" -iconName "file_storer" -description "For storing files of specific types"
+Register-FolderType -name "SandboxSeparator" -displayName "Sandbox Separator" -iconName "sandbox_separator" -description "For organizing experiments and separate workspaces"
+Register-FolderType -name "AssetsStorer" -displayName "Assets Storer" -iconName "assets_storer" -description "For storing various media and project assets"
+
+# Create registry entries to add option to the standard "New" menu
+$registryPath = "HKLM:\SOFTWARE\Classes\Directory\Background\shell\New Custom Folder"
+New-Item -Path $registryPath -Force | Out-Null
+New-ItemProperty -Path $registryPath -Name "Icon" -Value "$iconDir\file_storer.ico" -PropertyType String | Out-Null
+New-ItemProperty -Path $registryPath -Name "Position" -Value "Top" -PropertyType String | Out-Null
+
+# Refresh explorer
+Write-Host "Refreshing Windows Explorer..."
+Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+Start-Process explorer
+
+Write-Host "Custom folder types have been registered successfully!"
+Write-Host "You can now right-click in any folder and select 'New Custom Folder' to create your special folders."
+Write-Host "If the menu option doesn't appear immediately, try restarting Windows Explorer or rebooting your system."
+Write-Host "Press any key to exit..."
+$host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
